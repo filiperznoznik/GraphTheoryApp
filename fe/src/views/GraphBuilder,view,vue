@@ -1,0 +1,565 @@
+<!-- GraphCanvas.vue -->
+<template>
+  <div class="graph-canvas-container">
+    <div class="graph-toolbar">
+      <button 
+        @click="setMode('add-node')" 
+        :class="['btn', 'btn-primary', { active: mode === 'add-node' }]"
+      >
+        Add Node
+      </button>
+      <button 
+        @click="setMode('add-edge')" 
+        :class="['btn', 'btn-secondary', { active: mode === 'add-edge' }]"
+      >
+        Add Edge
+      </button>
+      <button 
+        @click="setMode('select')" 
+        :class="['btn', 'btn-info', { active: mode === 'select' }]"
+      >
+        Select
+      </button>
+      <button @click="clearGraph" class="btn btn-danger">
+        Clear All
+      </button>
+      <div class="graph-stats">
+        Nodes: {{ nodes.length }} | Edges: {{ edges.length }}
+      </div>
+    </div>
+
+    <div 
+      class="graph-canvas" 
+      @click="handleCanvasClick"
+      @mousemove="handleMouseMove"
+      ref="canvas"
+    >
+      <svg width="100%" height="100%">
+        <!-- Render edges -->
+        <g class="edges">
+          <line
+            v-for="edge in edges"
+            :key="`${edge.from}-${edge.to}`"
+            :x1="getNodeById(edge.from).x"
+            :y1="getNodeById(edge.from).y"
+            :x2="getNodeById(edge.to).x"
+            :y2="getNodeById(edge.to).y"
+            class="edge"
+            :class="{ selected: edge.selected }"
+            @click.stop="selectEdge(edge)"
+          />
+        </g>
+        
+        <!-- Render temporary edge while creating -->
+        <line
+          v-if="tempEdge"
+          :x1="tempEdge.x1"
+          :y1="tempEdge.y1"
+          :x2="tempEdge.x2"
+          :y2="tempEdge.y2"
+          class="edge temp-edge"
+        />
+
+        <!-- Render nodes -->
+        <g class="nodes">
+          <circle
+            v-for="node in nodes"
+            :key="node.id"
+            :cx="node.x"
+            :cy="node.y"
+            :r="nodeRadius"
+            class="node"
+            :class="{ 
+              selected: node.selected, 
+              highlighted: node.highlighted,
+              'creating-edge': creatingEdgeFromNode === node.id 
+            }"
+            @click.stop="handleNodeClick(node)"
+            @mousedown="startDrag(node, $event)"
+          />
+          <text
+            v-for="node in nodes"
+            :key="`text-${node.id}`"
+            :x="node.x"
+            :y="node.y + 5"
+            class="node-label"
+            @click.stop="handleNodeClick(node)"
+          >
+            {{ node.label }}
+          </text>
+        </g>
+      </svg>
+    </div>
+
+    <!-- Node properties panel -->
+    <div v-if="selectedNode" class="properties-panel">
+      <h4>Node Properties</h4>
+      <div class="form-group">
+        <label>Label:</label>
+        <input 
+          v-model="selectedNode.label" 
+          type="text" 
+          @input="updateNode"
+        />
+      </div>
+      <div class="form-group">
+        <label>Color:</label>
+        <input 
+          v-model="selectedNode.color" 
+          type="color" 
+          @input="updateNode"
+        />
+      </div>
+      <button @click="deleteNode(selectedNode)" class="btn btn-danger btn-small">
+        Delete Node
+      </button>
+    </div>
+
+    <!-- Edge properties panel -->
+    <div v-if="selectedEdge" class="properties-panel">
+      <h4>Edge Properties</h4>
+      <div class="form-group">
+        <label>Weight:</label>
+        <input 
+          v-model.number="selectedEdge.weight" 
+          type="number" 
+          step="0.1"
+          @input="updateEdge"
+        />
+      </div>
+      <div class="form-group">
+        <label>Directed:</label>
+        <input 
+          v-model="selectedEdge.directed" 
+          type="checkbox"
+          @change="updateEdge"
+        />
+      </div>
+      <button @click="deleteEdge(selectedEdge)" class="btn btn-danger btn-small">
+        Delete Edge
+      </button>
+    </div>
+  </div>
+</template>
+
+<script>
+export default {
+  name: "GraphCanvas",
+  data() {
+    return {
+      nodes: [],
+      edges: [],
+      mode: 'add-node', // 'add-node', 'add-edge', 'select'
+      nodeCounter: 1,
+      nodeRadius: 20,
+      selectedNode: null,
+      selectedEdge: null,
+      creatingEdgeFromNode: null,
+      tempEdge: null,
+      dragging: null,
+      dragOffset: { x: 0, y: 0 }
+    };
+  },
+  methods: {
+    setMode(newMode) {
+      this.mode = newMode;
+      this.clearSelections();
+      this.creatingEdgeFromNode = null;
+      this.tempEdge = null;
+    },
+
+    handleCanvasClick(event) {
+      const rect = this.$refs.canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+
+      if (this.mode === 'add-node') {
+        this.addNode(x, y);
+      } else if (this.mode === 'select') {
+        this.clearSelections();
+      }
+    },
+
+    handleNodeClick(node) {
+      if (this.mode === 'add-edge') {
+        if (!this.creatingEdgeFromNode) {
+          // Start creating edge
+          this.creatingEdgeFromNode = node.id;
+          node.highlighted = true;
+        } else if (this.creatingEdgeFromNode !== node.id) {
+          // Complete edge creation
+          this.addEdge(this.creatingEdgeFromNode, node.id);
+          this.getNodeById(this.creatingEdgeFromNode).highlighted = false;
+          this.creatingEdgeFromNode = null;
+          this.tempEdge = null;
+        }
+      } else if (this.mode === 'select') {
+        this.selectNode(node);
+      }
+    },
+
+    handleMouseMove(event) {
+      if (this.creatingEdgeFromNode && this.mode === 'add-edge') {
+        const rect = this.$refs.canvas.getBoundingClientRect();
+        const fromNode = this.getNodeById(this.creatingEdgeFromNode);
+        this.tempEdge = {
+          x1: fromNode.x,
+          y1: fromNode.y,
+          x2: event.clientX - rect.left,
+          y2: event.clientY - rect.top
+        };
+      }
+
+      if (this.dragging) {
+        const rect = this.$refs.canvas.getBoundingClientRect();
+        this.dragging.x = event.clientX - rect.left - this.dragOffset.x;
+        this.dragging.y = event.clientY - rect.top - this.dragOffset.y;
+      }
+    },
+
+    startDrag(node, event) {
+      if (this.mode === 'select') {
+        this.dragging = node;
+        const rect = this.$refs.canvas.getBoundingClientRect();
+        this.dragOffset.x = event.clientX - rect.left - node.x;
+        this.dragOffset.y = event.clientY - rect.top - node.y;
+      }
+    },
+
+    addNode(x, y) {
+      const newNode = {
+        id: this.nodeCounter++,
+        x: x,
+        y: y,
+        label: `N${this.nodeCounter - 1}`,
+        color: '#4a90e2',
+        selected: false,
+        highlighted: false
+      };
+      this.nodes.push(newNode);
+    },
+
+    addEdge(fromId, toId) {
+      // Check if edge already exists
+      const edgeExists = this.edges.some(edge => 
+        (edge.from === fromId && edge.to === toId) ||
+        (edge.from === toId && edge.to === fromId)
+      );
+
+      if (!edgeExists) {
+        const newEdge = {
+          from: fromId,
+          to: toId,
+          weight: 1,
+          directed: false,
+          selected: false
+        };
+        this.edges.push(newEdge);
+      }
+    },
+
+    selectNode(node) {
+      this.clearSelections();
+      node.selected = true;
+      this.selectedNode = node;
+    },
+
+    selectEdge(edge) {
+      this.clearSelections();
+      edge.selected = true;
+      this.selectedEdge = edge;
+    },
+
+    clearSelections() {
+      this.nodes.forEach(node => {
+        node.selected = false;
+        node.highlighted = false;
+      });
+      this.edges.forEach(edge => {
+        edge.selected = false;
+      });
+      this.selectedNode = null;
+      this.selectedEdge = null;
+    },
+
+    deleteNode(node) {
+      // Remove edges connected to this node
+      this.edges = this.edges.filter(edge => 
+        edge.from !== node.id && edge.to !== node.id
+      );
+      // Remove the node
+      this.nodes = this.nodes.filter(n => n.id !== node.id);
+      this.selectedNode = null;
+    },
+
+    deleteEdge(edge) {
+      this.edges = this.edges.filter(e => 
+        !(e.from === edge.from && e.to === edge.to)
+      );
+      this.selectedEdge = null;
+    },
+
+    updateNode() {
+      // Node is already reactive, no need for additional updates
+    },
+
+    updateEdge() {
+      // Edge is already reactive, no need for additional updates
+    },
+
+    getNodeById(id) {
+      return this.nodes.find(node => node.id === id);
+    },
+
+    clearGraph() {
+      if (confirm('Are you sure you want to clear the entire graph?')) {
+        this.nodes = [];
+        this.edges = [];
+        this.clearSelections();
+        this.nodeCounter = 1;
+        this.creatingEdgeFromNode = null;
+        this.tempEdge = null;
+      }
+    }
+  },
+
+  mounted() {
+    // Handle mouse up for dragging
+    document.addEventListener('mouseup', () => {
+      this.dragging = null;
+    });
+
+    // Handle escape key to cancel operations
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        if (this.creatingEdgeFromNode) {
+          this.getNodeById(this.creatingEdgeFromNode).highlighted = false;
+          this.creatingEdgeFromNode = null;
+          this.tempEdge = null;
+        }
+        this.clearSelections();
+      }
+    });
+  }
+};
+</script>
+
+<style scoped>
+.graph-canvas-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #f8f9fa;
+}
+
+.graph-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 10px 20px;
+  background: white;
+  border-bottom: 1px solid #dee2e6;
+  gap: 10px;
+}
+
+.btn {
+  padding: 8px 16px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+  background: white;
+  transition: all 0.2s;
+}
+
+.btn:hover {
+  background: #f8f9fa;
+}
+
+.btn.active {
+  background: #007bff;
+  color: white;
+  border-color: #007bff;
+}
+
+.btn-primary {
+  background: #007bff;
+  color: white;
+  border-color: #007bff;
+}
+
+.btn-secondary {
+  background: #6c757d;
+  color: white;
+  border-color: #6c757d;
+}
+
+.btn-info {
+  background: #17a2b8;
+  color: white;
+  border-color: #17a2b8;
+}
+
+.btn-danger {
+  background: #dc3545;
+  color: white;
+  border-color: #dc3545;
+}
+
+.btn-small {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.graph-stats {
+  margin-left: auto;
+  font-weight: bold;
+  color: #6c757d;
+}
+
+.graph-canvas {
+  flex: 1;
+  position: relative;
+  cursor: crosshair;
+  background: white;
+  overflow: hidden;
+}
+
+.graph-canvas.select-mode {
+  cursor: default;
+}
+
+.node {
+  fill: #4a90e2;
+  stroke: #2c5aa0;
+  stroke-width: 2;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.node:hover {
+  stroke-width: 3;
+  filter: brightness(1.1);
+}
+
+.node.selected {
+  fill: #ff6b6b;
+  stroke: #e74c3c;
+}
+
+.node.highlighted {
+  fill: #ffd93d;
+  stroke: #f39c12;
+  animation: pulse 1s infinite;
+}
+
+.node.creating-edge {
+  fill: #2ecc71;
+  stroke: #27ae60;
+}
+
+.node-label {
+  text-anchor: middle;
+  dominant-baseline: central;
+  font-size: 12px;
+  font-weight: bold;
+  fill: white;
+  pointer-events: none;
+  user-select: none;
+}
+
+.edge {
+  stroke: #6c757d;
+  stroke-width: 2;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.edge:hover {
+  stroke-width: 3;
+  stroke: #007bff;
+}
+
+.edge.selected {
+  stroke: #ff6b6b;
+  stroke-width: 3;
+}
+
+.temp-edge {
+  stroke: #ffd93d;
+  stroke-width: 2;
+  stroke-dasharray: 5,5;
+  pointer-events: none;
+}
+
+.properties-panel {
+  position: absolute;
+  top: 80px;
+  right: 20px;
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  width: 250px;
+  border: 1px solid #dee2e6;
+}
+
+.properties-panel h4 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  color: #495057;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: bold;
+  color: #495057;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}
+
+/* Make the canvas fill the available space */
+.graph-canvas svg {
+  display: block;
+}
+</style>
+
+<!-- GraphTheoryPage.vue -->
+<template>
+  <div class="graph-theory-page">
+    <GraphCanvas />
+  </div>
+</template>
+
+<script>
+import GraphCanvas from "@/components/GraphCanvas.vue";
+
+export default {
+  name: "GraphTheoryPage",
+  components: {
+    GraphCanvas,
+  },
+};
+</script>
+
+<style scoped>
+.graph-theory-page {
+  height: 100vh;
+  overflow: hidden;
+}
+</style>
