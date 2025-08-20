@@ -8,7 +8,7 @@
 import UserList from "@/components/UserList.vue";
 
 export default {
-  name: "Users",
+  name: "UsersPage",
   components: {
     UserList,
   },
