@@ -20,13 +20,17 @@ export class UsersService {
     return this.usersRepository.find();
   }
 
-  async findOne(id: number): Promise<User> {
+  async findOne(id: number): Promise<User | null> {
     return this.usersRepository.findOne({ where: { id } });
   }
 
   async update(id: number, updateUserDto: Partial<CreateUserDto>): Promise<User> {
     await this.usersRepository.update(id, updateUserDto);
-    return this.findOne(id);
+    const user = await this.findOne(id);
+    if (!user) {
+      throw new Error(`User with id ${id} not found`);
+    }
+    return user;
   }
 
   async remove(id: number): Promise<void> {
